@@ -1,0 +1,10 @@
+name: app-service-rag-openai-ai-search-python
+metadata:
+  template: app-service-rag-openai-ai-search-python@0.0.1
+infra:
+  path: ./infra
+services:
+  web:
+    project: .
+    language: python
+    host: appservice

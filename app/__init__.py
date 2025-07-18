@@ -1,0 +1,3 @@
+"""
+FastAPI RAG application
+"""
