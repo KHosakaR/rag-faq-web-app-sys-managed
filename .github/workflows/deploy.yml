@@ -8,6 +8,8 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/azure-app-service/python:3.11
 
     steps:
     # 1. ソースコードをチェックアウト
