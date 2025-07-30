@@ -40,6 +40,13 @@ class AppSettings(BaseSettings):
     azure_search_service_url: str = Field(..., env="AZURE_SEARCH_SERVICE_URL")
     azure_search_index_name: str = Field(..., env="AZURE_SEARCH_INDEX_NAME")
     
+    # Azure Content Safety Settings
+    azure_content_safety_endpoint: str = Field(..., env="AZURE_CONTENT_SAFETY_ENDPOINT")
+    
+    # Azure AI Foundry Agent Settings
+    azure_ai_foundry_endpoint: str = Field(..., env="AZURE_AI_FOUNDRY_ENDPOINT")
+    azure_ai_foundry_agent_id: str = Field(..., env="AZURE_AI_FOUNDRY_AGENT_ID")
+    
     # Other settings
     system_prompt: str = Field(
         "You are an AI assistant that helps people find information from their documents. Always cite your sources using the document title.",
