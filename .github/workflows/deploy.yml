@@ -8,39 +8,16 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    container:
-      image: python:3.11
 
     steps:
     # 1. ソースコードをチェックアウト
     - name: Checkout repository
       uses: actions/checkout@v3
 
-    # 2. Python セットアップ
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-
-    # 3. pip キャッシュの設定
-    - name: Cache pip packages
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
-
-    # 4. .python_packages に依存関係をインストール
-    - name: Install dependencies into .python_packages
-      run: |
-        mkdir -p .python_packages/lib/site-packages
-        pip install --target=".python_packages/lib/site-packages" -r requirements.txt
-
-    # 5. Azure にデプロイ
-    - name: Deploy to Azure Web App
+    # 2. Azure Web App にデプロイ（Oryx ビルドを使用）
+    - name: Deploy to Azure Web App (Oryx build)
       uses: azure/webapps-deploy@v2
       with:
-        app-name: hosaka-rag-faq-web-app  # Webアプリ名
-        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-        package: .
+        app-name: hosaka-rag-faq-web-app               # Azure Web App の名前
+        publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }} # 発行プロファイル
+        package: .                                     # デプロイ対象のパッケージ（リポジトリ全体）
