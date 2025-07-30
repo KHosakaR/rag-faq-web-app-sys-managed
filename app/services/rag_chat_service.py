@@ -9,7 +9,6 @@ import logging
 from typing import List
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from openai import AsyncAzureOpenAI
-from app.config import settings
 from app.models.chat_models import ChatMessage
 from app.config import settings
 
@@ -37,6 +36,21 @@ class RagChatService:
         self.search_url = settings.azure_search_service_url
         self.search_index_name = settings.azure_search_index_name
         self.system_prompt = settings.system_prompt
+        
+        self.LOW_CONFIDENCE_PHRASES = [
+            "requested information is not available",
+            "please try another query",
+            "no relevant information found",
+            "could not find relevant information",
+            "data is unavailable",
+            "情報が見つかりません",
+            "別のクエリやトピックを試してください",
+            "別の質問やトピックでお試しください",
+            "該当する情報が見つかりません",
+            "情報を取得できません",
+            "関連する情報がありません",
+            "追加の情報は含まれていません"
+        ]
         
         # Create Azure credentials for managed identity
         # This allows secure, passwordless authentication to Azure services
@@ -128,8 +142,19 @@ class RagChatService:
                 stream=False
             )
             
+            message = response.choices[0].message
+            content = message.content.lower()
+            citations = message.context.get("citations", [])
+            
+            is_low_confidence = False
+            # NGワード判定
+            if any(phrase in content for phrase in self.LOW_CONFIDENCE_PHRASES):
+                is_low_confidence = True
+            elif len(citations) <= 1:  # citationsが1件以下なら低信頼
+                is_low_confidence = True
+            
             # Return the raw response
-            return response
+            return response, is_low_confidence
             
         except Exception as e:
             logger.error(f"Error in get_chat_completion: {str(e)}")

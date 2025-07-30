@@ -30,9 +30,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const assistantMessageTemplate = document.getElementById('assistant-message-template');
     
     // Quick response buttons
-    const btnPersonalInfo = document.getElementById('btn-personal-info');
-    const btnWarranty = document.getElementById('btn-warranty');
-    const btnCompany = document.getElementById('btn-company');
+    // const btnPersonalInfo = document.getElementById('btn-personal-info');
+    // const btnWarranty = document.getElementById('btn-warranty');
+    // const btnCompany = document.getElementById('btn-company');
     
     // Chat history array
     let messages = [];
@@ -46,9 +46,9 @@ document.addEventListener('DOMContentLoaded', function() {
     // Event listeners
     chatForm.addEventListener('submit', handleChatSubmit);
     chatInput.addEventListener('keydown', handleKeyDown);
-    btnPersonalInfo.addEventListener('click', () => sendQuickQuestion("What does Contoso do with my personal information?"));
-    btnWarranty.addEventListener('click', () => sendQuickQuestion("How do I file a warranty claim?"));
-    btnCompany.addEventListener('click', () => sendQuickQuestion("Tell me about your company."));
+    // btnPersonalInfo.addEventListener('click', () => sendQuickQuestion("What does Contoso do with my personal information?"));
+    // btnWarranty.addEventListener('click', () => sendQuickQuestion("How do I file a warranty claim?"));
+    // btnCompany.addEventListener('click', () => sendQuickQuestion("Tell me about your company."));
     
     /**
      * Handles form submission when the user sends a message
@@ -132,6 +132,9 @@ document.addEventListener('DOMContentLoaded', function() {
         if (content && content.length > 0) {
             // Format content with citations if available
             let formattedContent = content;
+
+            // API側のsources_textをリンク化（[1] https://example.com）
+            formattedContent = formattedContent.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank">$1</a>');
             
             if (citations && citations.length > 0) {
                 // Replace [doc1], [doc2], etc. with interactive citation links
@@ -157,7 +160,9 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
             }
             
-            messageContent.innerHTML = formattedContent.replace(/\n/g, '<br>');
+            // **MarkdownをHTMLに変換**
+            messageContent.innerHTML = marked.parse(formattedContent);
+            // messageContent.innerHTML = formattedContent.replace(/\n/g, '<br>');
             
             // Store the message citations as a data attribute
             messageDiv.setAttribute('data-citations', JSON.stringify(messageCitations));
@@ -276,9 +281,9 @@ document.addEventListener('DOMContentLoaded', function() {
     function showLoading() {
         loadingIndicator.classList.remove('d-none');
         sendButton.disabled = true;
-        btnPersonalInfo.disabled = true;
-        btnWarranty.disabled = true;
-        btnCompany.disabled = true;
+        // btnPersonalInfo.disabled = true;
+        // btnWarranty.disabled = true;
+        // btnCompany.disabled = true;
     }
     
     /**
@@ -287,9 +292,9 @@ document.addEventListener('DOMContentLoaded', function() {
     function hideLoading() {
         loadingIndicator.classList.add('d-none');
         sendButton.disabled = false;
-        btnPersonalInfo.disabled = false;
-        btnWarranty.disabled = false;
-        btnCompany.disabled = false;
+        // btnPersonalInfo.disabled = false;
+        // btnWarranty.disabled = false;
+        // btnCompany.disabled = false;
     }
     
     /**

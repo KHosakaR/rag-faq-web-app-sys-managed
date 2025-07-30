@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 # Import the RAG chat service after logging to capture any initialization logs
 from app.services.rag_chat_service import rag_chat_service
+from app.services.foundry_agent_service import foundry_agent_service
+from app.services.chat_filter import chat_filter
 
 # Create FastAPI app
 app = FastAPI(
@@ -68,8 +70,42 @@ async def chat_completion(chat_request: ChatRequest):
         if not chat_request.messages:
             raise HTTPException(status_code=400, detail="Messages cannot be empty")
         
+        ## NG質問ロジック処理
+        # 最新のユーザーの質問を抽出（最後のuserロールのメッセージ）
+        user_messages = [msg.content for msg in chat_request.messages if msg.role == "user"]
+        latest_user_question = user_messages[-1] if user_messages else ""
+
+        # NG質問フィルタリング（講義外・悪用系の質問を遮断）
+        is_blocked, reason = chat_filter.is_blocked_input(latest_user_question)
+        if is_blocked:
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant",
+                        "content": f"申し訳ありません。この質問は不適切な内容であると見做されたため、お答えすることができません。\nほかの内容でお願いいたします。\n理由: {reason}"
+                        # "content": "申し訳ありません。この質問は講義とは関係のない内容（設定ワードと類似）と判断されたため、お答えできません。"
+                    }
+                }]
+            }
+        
         # Get chat completion from RAG service
-        response = await rag_chat_service.get_chat_completion(chat_request.messages)
+        response, is_low_confidence = await rag_chat_service.get_chat_completion(chat_request.messages)
+        
+        if is_low_confidence:
+            logger.info("信頼度判定 → Bing Grounding Agent にフォールバック")
+            
+            # 履歴全体を渡す
+            history_data = [{"role": m.role, "content": m.content} for m in chat_request.messages]
+            response = foundry_agent_service.search_with_bing(history_data)
+            
+            # 案内文を付与(太字)
+            notice_message = (
+                "**※以下はWeb検索による回答です。**\n\n"
+            )
+
+            if "choices" in response and len(response["choices"]) > 0:
+                original_content = response["choices"][0]["message"]["content"]
+                response["choices"][0]["message"]["content"] = notice_message + original_content
         
         return response
         
