@@ -147,4 +147,4 @@ if __name__ == "__main__":
     # This lets you test the application locally with Uvicorn
     # For production deployment, use a proper ASGI server like Gunicorn
     port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("application:app", host="0.0.0.0", port=port, reload=True)
