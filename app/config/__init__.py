@@ -47,6 +47,10 @@ class AppSettings(BaseSettings):
     azure_ai_foundry_endpoint: str = Field(..., env="AZURE_AI_FOUNDRY_ENDPOINT")
     azure_ai_foundry_agent_id: str = Field(..., env="AZURE_AI_FOUNDRY_AGENT_ID")
     
+    # Azure Blob Storage Settings
+    blob_account_url: str = Field(..., env="BLOB_ACCOUNT_URL")
+    blob_sas_ttl_min: int = Field(..., env="BLOB_SAS_TTL_MIN")
+    
     # Other settings
     system_prompt: str = Field(
         "You are an AI assistant that helps people find information from their documents. Always cite your sources using the document title.",

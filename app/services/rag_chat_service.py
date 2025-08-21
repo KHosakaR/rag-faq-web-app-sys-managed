@@ -71,6 +71,45 @@ class RagChatService:
         
         logger.info("RagChatService initialized with environment variables")
     
+    def _extract_citations(self, message) -> list[dict]:
+        """
+        Azure OpenAI 'on your data' の citations から
+        [{title: str, url: str}] の配列を作る
+        """
+        cites = []
+        ctx = getattr(message, "context", None) or {}
+        for c in ctx.get("citations", []):
+            # Azure AI Search 統合の citation で取り得るキーを広めにカバー
+            url = (
+                c.get("url")
+                or c.get("filepath")
+                or c.get("filePath")
+                or c.get("source")
+                or ""
+            )
+            title = (
+                c.get("title")
+                or c.get("filename")
+                or (url.split("/")[-1] if url else "source")
+            )
+            if url:
+                cites.append({"title": title, "url": url})
+        return cites
+    
+    def _normalize_response(self, message, citations: list[dict]) -> dict:
+        """
+        UI がそのまま使える共通フォーマットに整形
+        """
+        return {
+            "choices": [{
+                "message": {
+                    "role": message.role,
+                    "content": message.content
+                }
+            }],
+            "citations": citations
+        }
+    
     async def get_chat_completion(self, history: List[ChatMessage]):
         """
         Process a chat completion request with RAG capabilities by integrating with Azure AI Search
@@ -127,6 +166,18 @@ class RagChatService:
                         "type": "deployment_name",
                         "deployment_name": self.embedding_deployment
                     },
+                    # Search インデックスのフィールドと OYD の対応
+                    "fieldsMapping": {
+                        "contentFields": ["content_text"],
+                        "vectorFields":  ["content_embedding"],
+                        "titleField":    "document_title",
+                        "filepathField": "source_path"
+                    },
+                    # （任意）取り込み件数や厳密度の調整
+                    "top_n_documents": 5,
+                    "strictness": 3,
+                    # （任意）モデルへ渡す役割説明（プロンプト強化）
+                    # "role_information": self.system_prompt or ""
                 }
             }
             
@@ -143,18 +194,16 @@ class RagChatService:
             )
             
             message = response.choices[0].message
-            content = message.content.lower()
-            citations = message.context.get("citations", [])
+            content_lc = (message.content or "").lower()
+            citations = self._extract_citations(message)
             
-            is_low_confidence = False
-            # NGワード判定
-            if any(phrase in content for phrase in self.LOW_CONFIDENCE_PHRASES):
-                is_low_confidence = True
-            elif len(citations) <= 1:  # citationsが1件以下なら低信頼
-                is_low_confidence = True
+            # NGワード判定（文言/出典の少なさ）
+            is_low = any(p in content_lc for p in self.LOW_CONFIDENCE_PHRASES) or (len(citations) <= 1)
+            
+            normalized = self._normalize_response(msg, citations if not is_low else [])
             
             # Return the raw response
-            return response, is_low_confidence
+            return normalized, is_low
             
         except Exception as e:
             logger.error(f"Error in get_chat_completion: {str(e)}")
