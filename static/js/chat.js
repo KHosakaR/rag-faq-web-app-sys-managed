@@ -187,7 +187,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         const citationData = JSON.parse(messageCitations[idx]);
                         
                         // Show citation modal
-                        showCitationModal(citationData);
+                        // showCitationModal(citationData);
+                        openCitation(citationData);
                     });
                 });
             }, 100);
@@ -258,6 +259,31 @@ document.addEventListener('DOMContentLoaded', function() {
                 document.removeEventListener('keydown', closeOnEscape);
             }
         });
+    }
+
+    function openCitation(cite) {
+        const rawPath = cite.filePath || cite.url;
+        if (!rawPath) {
+            alert("Citation URL not found");
+            return;
+        }
+
+        fetch(`/api/blob/sas?path=${encodeURIComponent(rawPath)}`)
+            .then(async r => {
+                if (!r.ok) {
+                    const detail = await r.json().catch(() => ({}));
+                    if (r.status === 403) throw new Error(detail?.detail || "許可されていない参照です。");
+                    throw new Error(detail?.detail || "SAS発行に失敗しました。");
+                }
+                return r.json();
+            })
+            .then(data => {
+                window.open(data.url, "_blank", "noopener");
+            })
+            .catch(err => {
+                console.error(err);
+                alert("SAS URL を取得できませんでした");
+            });
     }
     
     /**

@@ -15,7 +15,10 @@ Key components:
 import os
 import logging
 import uvicorn
-from fastapi import FastAPI, Request, HTTPException
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
+from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import HTMLResponse
@@ -33,6 +36,44 @@ logger = logging.getLogger(__name__)
 from app.services.rag_chat_service import rag_chat_service
 from app.services.foundry_agent_service import foundry_agent_service
 from app.services.chat_filter import chat_filter
+from app.services.blob_sas_service import blob_sas_service, SasResult
+from app.config import settings
+
+# クリックで生成するだけなので短めで十分（例: 10分）
+DEFAULT_TTL_MIN = settings.blob_sas_ttl_min
+
+# 生成頻度を下げるための超シンプルなメモリキャッシュ
+# キー: (path, ttl_min) -> 値: {"result": SasResult, "expires": datetime}
+_sas_cache: dict[tuple[str, int], dict] = {}
+
+# セキュリティ: 許可するコンテナのホワイトリスト（必要に応じて環境変数化）
+ALLOWED_CONTAINERS = {"faq", "faq-outpput"}  # ここは実環境に合わせて
+
+ACCOUNT_URL = settings.blob_account_url
+
+def _is_allowed_host(path_or_url: str) -> bool:
+    if not ACCOUNT_URL:
+        return False
+    try:
+        if path_or_url.startswith("http"):
+            return urlparse(path_or_url).netloc == urlparse(ACCOUNT_URL).netloc
+        # 'container/blob' 形式は自アカウント扱い
+        return True
+    except Exception:
+        return False
+
+def is_allowed_container(path_or_url: str) -> bool:
+    # URLでも 'container/blob' でも先頭のコンテナ名を取り出して判定
+    try:
+        if path_or_url.startswith("http"):
+            u = urlparse(path_or_url)
+            parts = [p for p in u.path.split("/") if p]
+            container = parts[0] if parts else ""
+        else:
+            container = path_or_url.split("/", 1)[0]
+        return container in ALLOWED_CONTAINERS
+    except Exception:
+        return False
 
 # Create FastAPI app
 app = FastAPI(
@@ -53,6 +94,49 @@ async def get_home(request: Request):
     Serve the main chat interface
     """
     return templates.TemplateResponse("index.html", {"request": request})
+
+@app.get("/api/blob/sas", response_model=SasResult)
+async def get_blob_sas(
+    path: str = Query(..., description="Blob のフルURL または 'container/blob' 形式のパス"),
+    ttl_min: int | None = Query(None, ge=1, le=60, description="SAS の有効期限（分）。未指定は既定値。"),
+):
+    """
+    Search の source_path（プライベートURL）から、短命の Read-only SAS URL を発行して返す。
+    - 非同期実装（内部の同期SDK呼び出しはスレッドプールへ）
+    - 簡易キャッシュで生成回数を低減
+    - ホワイトリストで意図しないコンテナをブロック
+    """
+    try:
+        if not _is_allowed_host(path):
+            raise HTTPException(status_code=403, detail="許可されていないストレージアカウントです。")
+        if not is_allowed_container(path):
+            raise HTTPException(status_code=403, detail="このコンテナは許可されていません。")
+
+        ttl = ttl_min or DEFAULT_TTL_MIN
+        key = (path, ttl)
+
+        # キャッシュヒット
+        now = datetime.now(timezone.utc)
+        if key in _sas_cache:
+            item = _sas_cache[key]
+            if item["expires"] > now:
+                return item["result"]
+
+        # 生成（同期SDKをスレッドで）
+        res: SasResult = await run_in_threadpool(blob_sas_service.get_sas_url, path, ttl)
+
+        # キャッシュ（SAS有効期限の手前で失効させる: 例 90%）
+        expire_at = now + timedelta(minutes=int(ttl * 0.9))
+        _sas_cache[key] = {"result": res, "expires": expire_at}
+
+        return res
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        # 具体的な理由はログに残しつつ、表には出しすぎない
+        logger.exception("Failed to issue SAS")
+        raise HTTPException(status_code=400, detail=f"SAS発行に失敗: {e}")
 
 
 @app.post("/api/chat/completion")
@@ -90,6 +174,8 @@ async def chat_completion(chat_request: ChatRequest):
         
         # Get chat completion from RAG service
         response, is_low_confidence = await rag_chat_service.get_chat_completion(chat_request.messages)
+        print("application: ")
+        print(response)
         
         if is_low_confidence:
             logger.info("信頼度判定 → Bing Grounding Agent にフォールバック")
@@ -106,6 +192,8 @@ async def chat_completion(chat_request: ChatRequest):
             if "choices" in response and len(response["choices"]) > 0:
                 original_content = response["choices"][0]["message"]["content"]
                 response["choices"][0]["message"]["content"] = notice_message + original_content
+            
+            response.setdefault("citations", [])
         
         return response
         
