@@ -73,13 +73,12 @@ class RagChatService:
     
     def _extract_citations(self, message) -> list[dict]:
         """
-        Azure OpenAI 'on your data' の citations から
-        [{title: str, url: str}] の配列を作る
+        Azure OpenAI OYD の citations を UI 用に正規化
+        -> [{title, content, filePath, url}]
         """
         cites = []
         ctx = getattr(message, "context", None) or {}
         for c in ctx.get("citations", []):
-            # Azure AI Search 統合の citation で取り得るキーを広めにカバー
             url = (
                 c.get("url")
                 or c.get("filepath")
@@ -92,22 +91,26 @@ class RagChatService:
                 or c.get("filename")
                 or (url.split("/")[-1] if url else "source")
             )
-            if url:
-                cites.append({"title": title, "url": url})
+            cites.append({
+                "title": title,
+                "content": c.get("content", ""),
+                "filePath": url,   # UI は filePath or url を参照
+                "url": url,
+            })
         return cites
     
-    def _normalize_response(self, message, citations: list[dict]) -> dict:
+    def _normalize_response(self, content: str, citations: list[dict]) -> dict:
         """
         UI がそのまま使える共通フォーマットに整形
         """
         return {
             "choices": [{
                 "message": {
-                    "role": message.role,
-                    "content": message.content
+                    "role": "assistant",
+                    "content": content,
+                    "context": {"citations": citations}
                 }
-            }],
-            "citations": citations
+            }]
         }
     
     async def get_chat_completion(self, history: List[ChatMessage]):
@@ -167,11 +170,11 @@ class RagChatService:
                         "deployment_name": self.embedding_deployment
                     },
                     # Search インデックスのフィールドと OYD の対応
-                    "fieldsMapping": {
-                        "contentFields": ["content_text"],
-                        "vectorFields":  ["content_embedding"],
-                        "titleField":    "document_title",
-                        "filepathField": "source_path"
+                    "fields_mapping": {
+                        "content_fields": ["content_text"],
+                        "vector_fields":  ["content_embedding"],
+                        "title_field":    "document_title",
+                        "filepath_field": "source_path"
                     },
                     # （任意）取り込み件数や厳密度の調整
                     "top_n_documents": 5,
@@ -192,15 +195,21 @@ class RagChatService:
                 },
                 stream=False
             )
+            # print("rag_chat_service.get_chat_completion:")
+            # print(response)
             
-            message = response.choices[0].message
-            content_lc = (message.content or "").lower()
-            citations = self._extract_citations(message)
+            ai_msg  = response.choices[0].message
+            content_raw = ai_msg .content or ""
+            citations_norm  = self._extract_citations(ai_msg)
             
             # NGワード判定（文言/出典の少なさ）
-            is_low = any(p in content_lc for p in self.LOW_CONFIDENCE_PHRASES) or (len(citations) <= 1)
+            content_lc = content_raw.lower()
+            is_low = (
+                any(p in content_lc for p in self.LOW_CONFIDENCE_PHRASES)
+                or len(citations_norm) == 0
+            )
             
-            normalized = self._normalize_response(msg, citations if not is_low else [])
+            normalized = self._normalize_response(content_raw, citations_norm if not is_low else [])
             
             # Return the raw response
             return normalized, is_low

@@ -174,6 +174,8 @@ async def chat_completion(chat_request: ChatRequest):
         
         # Get chat completion from RAG service
         response, is_low_confidence = await rag_chat_service.get_chat_completion(chat_request.messages)
+        print("application: ")
+        print(response)
         
         if is_low_confidence:
             logger.info("信頼度判定 → Bing Grounding Agent にフォールバック")
