@@ -7,6 +7,7 @@ azure-search-documents==11.4.0b6
 azure-ai-contentsafety==1.0.0
 azure-ai-projects==1.0.0b12
 azure-ai-agents==1.0.2
+azure-storage-blob>=12.19.0
 openai==1.78.1
 aiohttp==3.11.18
 python-multipart==0.0.20
