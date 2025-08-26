@@ -51,7 +51,7 @@ ALLOWED_CONTAINERS = {"faq", "faq-outpput"}  # ここは実環境に合わせて
 
 ACCOUNT_URL = settings.blob_account_url
 
-def _is_allowed_host(path_or_url: str) -> bool:
+def is_allowed_host(path_or_url: str) -> bool:
     if not ACCOUNT_URL:
         return False
     try:
@@ -107,7 +107,7 @@ async def get_blob_sas(
     - ホワイトリストで意図しないコンテナをブロック
     """
     try:
-        if not _is_allowed_host(path):
+        if not is_allowed_host(path):
             raise HTTPException(status_code=403, detail="許可されていないストレージアカウントです。")
         if not is_allowed_container(path):
             raise HTTPException(status_code=403, detail="このコンテナは許可されていません。")
@@ -174,8 +174,6 @@ async def chat_completion(chat_request: ChatRequest):
         
         # Get chat completion from RAG service
         response, is_low_confidence = await rag_chat_service.get_chat_completion(chat_request.messages)
-        print("application: ")
-        print(response)
         
         if is_low_confidence:
             logger.info("信頼度判定 → Bing Grounding Agent にフォールバック")

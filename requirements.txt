@@ -15,5 +15,6 @@ pydantic==2.11.4
 pydantic-settings==2.2.1
 rich==14.0.0
 sentence-transformers==5.0.0
+cachetools==6.1.0
 
 
