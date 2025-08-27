@@ -36,7 +36,7 @@ class ChatFilter:
         high_similarity_threshold: float = 0.90, # 早期遮断しきい値
         similarity_max_chars: int = 1000,
         safety_threshold: int = 2,
-        cs_timeout_sec: float = 0.8,             # CSソフトタイムアウト
+        cs_timeout_sec: float = 1.2,             # CSソフトタイムアウト
         cache_ttl_sec: int = 6*60*60,            # 6時間
         cache_maxsize: int = 1024,
         embedding_model_path: str = './similarity_local_model',
