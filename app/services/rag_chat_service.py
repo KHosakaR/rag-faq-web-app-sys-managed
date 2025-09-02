@@ -6,6 +6,8 @@ Azure OpenAI with Azure AI Search. RAG enhances LLM responses by grounding them 
 your enterprise data stored in Azure AI Search.
 """
 import logging
+import json
+import asyncio
 from typing import List
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from openai import AsyncAzureOpenAI
@@ -55,7 +57,8 @@ class RagChatService:
             "該当する情報が見つかりません",
             "情報を取得できません",
             "関連する情報がありません",
-            "追加の情報は含まれていません"
+            "情報は含まれていません",
+            "情報が含まれていません"
         ]
         
         # Create Azure credentials for managed identity
@@ -77,13 +80,17 @@ class RagChatService:
         
         logger.info("RagChatService initialized with environment variables")
     
-    def _extract_citations(self, message) -> list[dict]:
+    def _extract_citations(self, message_or_ctx) -> list[dict]:
         """
         Azure OpenAI OYD の citations を UI 用に正規化
         -> [{title, content, filePath, url}]
         """
         cites = []
-        ctx = getattr(message, "context", None) or {}
+        # message でも context(dict) でも受けられるようにする
+        if isinstance(message_or_ctx, dict):
+            ctx = message_or_ctx
+        else:
+            ctx = getattr(message_or_ctx, "context", None) or {}
         count = 0
         for c in ctx.get("citations", []):
             url = (
@@ -236,6 +243,116 @@ class RagChatService:
             logger.error(f"Error in get_chat_completion: {str(e)}")
             # Propagate all errors to the controller layer
             raise
+    
+    # ===== ここからストリーミング（SSE）用 ==================================
+    def _sse_event(self, event: str, data: dict) -> bytes:
+        """SSE 1イベントのエンコード"""
+        return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
+
+    async def _citations_min_call(self, messages, data_source) -> list[dict]:
+        """
+        ストリームで citations が得られない場合の保険：
+        max_tokens=1 の最小呼び出しで citations のみ取得
+        """
+        try:
+            resp = await self.openai_client.chat.completions.create(
+                model=self.gpt_deployment,
+                messages=messages,
+                extra_body={"data_sources": [data_source]},
+                temperature=0.0,
+                max_tokens=1,
+                stream=False
+            )
+            return self._extract_citations(resp.choices[0].message)
+        except Exception as e:
+            logger.warning(f"[stream] citations min-call failed: {e}")
+            return []
+
+    async def stream_chat_completion(self, history: List[ChatMessage]):
+        """
+        SSE 用ジェネレータ：
+          - event: token     { delta: "…", cursor: int }
+          - event: citations { items: [...] }
+          - event: done      { content_len: int, is_low: bool }
+          - event: error     { message: str }
+        """
+        # 1) messages / data_source 準備
+        recent_history = history[-self.max_history_messages:] if len(history) > self.max_history_messages else history
+        messages = [{"role": "system", "content": self.system_prompt}]
+        for msg in recent_history:
+            messages.append({"role": msg.role, "content": msg.content})
+
+        data_source = {
+            "type": "azure_search",
+            "parameters": {
+                "endpoint": self.search_url,
+                "index_name": self.search_index_name,
+                "authentication": {"type": "system_assigned_managed_identity"},
+                "query_type": "semantic",
+                "semantic_configuration": f"{self.search_index_name}-semantic-configuration",
+                "fields_mapping": {
+                    "content_fields": ["content_text"],
+                    "title_field":    "document_title",
+                    "filepath_field": "source_path"
+                },
+                "top_n_documents": 5,
+                "strictness": 3,
+                "in_scope": True
+            }
+        }
+
+        full_parts: list[str] = []
+        cursor = 0
+        citations: list[dict] = []
+
+        try:
+            # 2) OpenAI ストリーム開始
+            stream = await self.openai_client.chat.completions.create(
+                model=self.gpt_deployment,
+                messages=messages,
+                extra_body={"data_sources": [data_source]},
+                temperature=0.2,
+                max_tokens=1024,
+                stream=True
+            )
+
+            async for chunk in stream:
+                # ChatCompletionChunk 形式を想定
+                for choice in getattr(chunk, "choices", []):
+                    delta = getattr(choice, "delta", None)
+                    if not delta:
+                        continue
+                    piece = getattr(delta, "content", None)
+                    if piece:
+                        full_parts.append(piece)
+                        cursor += len(piece)
+                        # 本文差分を即送信
+                        yield self._sse_event("token", {"delta": piece, "cursor": cursor})
+                    # モデル/SDKによっては delta.context に citations が混ざることがあるため拾っておく
+                    ctx = getattr(delta, "context", None)
+                    if ctx and not citations:
+                        try:
+                            citations = self._extract_citations(ctx)
+                        except Exception:
+                            pass
+
+            content = "".join(full_parts).strip()
+
+            # 3) 引用が未取得なら最小呼び出しで取得
+            if not citations:
+                citations = await self._citations_min_call(messages + [{"role": "assistant", "content": content}], data_source)
+
+            # 低信頼判定（既存ロジックに合わせる）
+            content_lc = content.lower()
+            is_low = (len(citations) == 0) or any(p in content_lc for p in self.LOW_CONFIDENCE_PHRASES)
+
+            # 4) citations → done
+            yield self._sse_event("citations", {"items": citations})
+            yield self._sse_event("done", {"content_len": len(content), "is_low": is_low})
+
+        except Exception as e:
+            logger.error(f"[stream] error: {e}")
+            yield self._sse_event("error", {"message": str(e)})
 
 
 # Create singleton instance
