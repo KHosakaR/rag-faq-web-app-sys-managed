@@ -28,6 +28,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const emptyChatTemplate = document.getElementById('empty-chat-template');
     const userMessageTemplate = document.getElementById('user-message-template');
     const assistantMessageTemplate = document.getElementById('assistant-message-template');
+
+    // Stream Settings
+    const USE_STREAM = true; // ストリーミングを優先
     
     // Quick response buttons
     // const btnPersonalInfo = document.getElementById('btn-personal-info');
@@ -49,6 +52,21 @@ document.addEventListener('DOMContentLoaded', function() {
     // btnPersonalInfo.addEventListener('click', () => sendQuickQuestion("What does Contoso do with my personal information?"));
     // btnWarranty.addEventListener('click', () => sendQuickQuestion("How do I file a warranty claim?"));
     // btnCompany.addEventListener('click', () => sendQuickQuestion("Tell me about your company."));
+
+    // 小さなHTMLエスケープ
+    function escHtml(s) {
+        return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    // セッションID（ローカルに保持して継続文脈に使う）
+    function getSessionId() {
+    let sid = localStorage.getItem('sessionId');
+    if (!sid) {
+        sid = (window.crypto?.randomUUID?.() || (String(Date.now()) + Math.random().toString(16).slice(2)));
+        localStorage.setItem('sessionId', sid);
+    }
+    return sid;
+    }
     
     /**
      * Handles form submission when the user sends a message
@@ -160,9 +178,30 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
             }
             
+            // 「引用元：」の一覧を末尾に差し込む（citations があれば）
+            if (citations && citations.length > 0) {
+                let listHtml = '\n\n<div class="source-list mt-2"><strong>引用元：</strong><br>';
+                citations.forEach((c, i) => {
+                    const url = c.url || c.filePath || '';
+                    if (!url) return;
+                    const idx = i + 1;
+                    // [docN] が本文に無くても参照できるよう、マッピングを用意
+                    if (!messageCitations[idx]) {
+                        messageCitations[idx] = JSON.stringify({
+                            title: c.title || url,
+                            content: c.content || '',
+                            filePath: c.filePath || url,
+                            url
+                        });
+                    }
+                    listHtml += `[${idx}] <a class="cite-link" style="cursor:pointer;" data-message-id="${messageId}" data-index="${idx}">${escHtml(url)}</a><br>`;
+                });
+                listHtml += '</div>';
+                formattedContent += listHtml;
+            }
+
             // **MarkdownをHTMLに変換**
             messageContent.innerHTML = marked.parse(formattedContent);
-            // messageContent.innerHTML = formattedContent.replace(/\n/g, '<br>');
             
             // Store the message citations as a data attribute
             messageDiv.setAttribute('data-citations', JSON.stringify(messageCitations));
@@ -191,11 +230,126 @@ document.addEventListener('DOMContentLoaded', function() {
                         openCitation(citationData);
                     });
                 });
+
+                // 「引用元：」側のリンクも同じ動きにする
+                const citeLinks = messageContent.querySelectorAll('.cite-link[data-index]');
+                citeLinks.forEach(link => {
+                    link.addEventListener('click', function(e){
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const messageId = this.getAttribute('data-message-id');
+                        const idx = this.getAttribute('data-index');
+                        const messageElement = document.getElementById(messageId);
+                        const stored = JSON.parse(messageElement.getAttribute('data-citations') || '{}');
+                        const citationData = JSON.parse(stored[idx]);
+                        openCitation(citationData);
+                    });
+                });
             }, 100);
         }
         
         chatHistory.appendChild(messageNode);
         scrollToBottom();
+    }
+
+    // ---- ストリーミング用ヘルパ ----
+    function startAssistantStreamBubble() {
+        // 空のアシスタントバブルを作成（本文は後で逐次追記）
+        const node = assistantMessageTemplate.content.cloneNode(true);
+        const card = node.querySelector('.card');
+        const contentEl = node.querySelector('.message-content');
+        const messageId = 'msg-' + Date.now();
+        card.setAttribute('id', messageId);
+        // streaming 中はまずプレーンテキストで高速表示
+        contentEl.textContent = '';
+        chatHistory.appendChild(node);
+        scrollToBottom();
+        return { cardEl: document.getElementById(messageId), contentEl: document.querySelector('#' + messageId + ' .message-content'), messageId };
+    }
+
+    function appendStreamToken(state, delta) {
+        // 逐次追記：一旦 textContent に追加（高速）
+        state.buffer += delta;
+        state.contentEl.textContent = state.buffer;
+        scrollToBottom();
+    }
+
+    function finalizeStreamBubble(state, citations) {
+        // 最後に Markdown 変換＆出典バッジ化
+        let formatted = state.buffer.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank">$1</a>');
+        // [docN] をバッジに差し替え
+        const pattern = /\[doc(\d+)\]/g;
+        const messageCitations = {};
+        formatted = formatted.replace(pattern, (match, index) => {
+            const idx = parseInt(index);
+            if (idx > 0 && idx <= (citations?.length || 0)) {
+                const c = citations[idx - 1] || {};
+                const citationData = JSON.stringify({
+                    title: c.title || '',
+                    content: c.content || '',
+                    filePath: c.filePath || '',
+                    url: c.url || ''
+                });
+                messageCitations[idx] = citationData;
+                return `<a class="badge bg-primary rounded-pill" style="cursor: pointer;" data-message-id="${state.messageId}" data-index="${idx}">${idx}</a>`;
+            }
+            return match;
+        });
+
+        // 末尾に「引用元：」を追加
+        if (citations && citations.length > 0) {
+            let listHtml = '\n\n<div class="source-list mt-2"><strong>引用元：</strong><br>';
+            citations.forEach((c, i) => {
+                const url = c.url || c.filePath || '';
+                if (!url) return;
+                const idx = i + 1;
+                // [docN] が本文に無くても参照できるよう、マッピングを用意
+                if (!messageCitations[idx]) {
+                    messageCitations[idx] = JSON.stringify({
+                        title: c.title || url,
+                        content: c.content || '',
+                        filePath: c.filePath || url,
+                        url
+                    });
+                }
+                listHtml += `[${idx}] <a class="cite-link" style="cursor:pointer;" data-message-id="${state.messageId}" data-index="${idx}">${escHtml(url)}</a><br>`;
+            });
+            listHtml += '</div>';
+            formatted += listHtml;
+        }
+
+        state.contentEl.innerHTML = marked.parse(formatted);
+        state.cardEl.setAttribute('data-citations', JSON.stringify(messageCitations));
+
+        // バッジのクリックリスナー
+        const badges = state.contentEl.querySelectorAll('.badge[data-index]');
+        badges.forEach(badge => {
+            badge.addEventListener('click', function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                const messageId = this.getAttribute('data-message-id');
+                const idx = this.getAttribute('data-index');
+                const messageElement = document.getElementById(messageId);
+                const stored = JSON.parse(messageElement.getAttribute('data-citations') || '{}');
+                const citationData = JSON.parse(stored[idx]);
+                openCitation(citationData);
+            });
+        });
+
+        // 「引用元：」側のリンク
+        const citeLinks = state.contentEl.querySelectorAll('.cite-link[data-index]');
+        citeLinks.forEach(link => {
+            link.addEventListener('click', function(e){
+                e.preventDefault();
+                e.stopPropagation();
+                const messageId = this.getAttribute('data-message-id');
+                const idx = this.getAttribute('data-index');
+                const messageElement = document.getElementById(messageId);
+                const stored = JSON.parse(messageElement.getAttribute('data-citations') || '{}');
+                const citationData = JSON.parse(stored[idx]);
+                openCitation(citationData);
+            });
+        });
     }
     
     /**
@@ -262,28 +416,42 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     function openCitation(cite) {
-        const rawPath = cite.filePath || cite.url;
-        if (!rawPath) {
+        const raw = cite.url || cite.filePath;
+        if (!raw) {
             alert("Citation URL not found");
             return;
         }
 
-        fetch(`/api/blob/sas?path=${encodeURIComponent(rawPath)}`)
+        // 小ヘルパ
+        const isHttpUrl = (s) => {
+            try { const u = new URL(s); return /^https?:/i.test(u.protocol); } catch { return false; }
+        };
+        const isInternalBlob = (s) => {
+            if (!window.BLOB_ACCOUNT_HOST) return false;
+            try { return new URL(s).host === window.BLOB_ACCOUNT_HOST; } catch { return false; }
+        };
+
+        // すでにSAS付き（sig= 含む） or 外部サイト → そのまま開く
+        if (isHttpUrl(raw) && (raw.includes("sig=") || !isInternalBlob(raw))) {
+            window.open(raw, "_blank", "noopener");
+            return;
+        }
+
+        // ここまで来たら自アカウントの Blob（URL でも 'container/blob' でも可）→ SAS を発行して開く
+        fetch(`/api/blob/sas?path=${encodeURIComponent(raw)}`)
             .then(async r => {
-                if (!r.ok) {
-                    const detail = await r.json().catch(() => ({}));
-                    if (r.status === 403) throw new Error(detail?.detail || "許可されていない参照です。");
-                    throw new Error(detail?.detail || "SAS発行に失敗しました。");
-                }
-                return r.json();
+            if (!r.ok) {
+                const detail = await r.json().catch(() => ({}));
+                if (r.status === 403) throw new Error(detail?.detail || "許可されていない参照です。");
+                throw new Error(detail?.detail || "SAS発行に失敗しました。");
+            }
+            return r.json();
             })
-            .then(data => {
-                window.open(data.url, "_blank", "noopener");
-            })
+            .then(data => window.open(data.url, "_blank", "noopener"))
             .catch(err => {
-                console.error(err);
-                alert("SAS URL を取得できませんでした");
-            });
+            console.error(err);
+            alert("SAS URL を取得できませんでした");
+        });
     }
     
     /**
@@ -362,13 +530,31 @@ document.addEventListener('DOMContentLoaded', function() {
         showLoading();
         
         // Send request to server
-        fetch('/api/chat/completion', {
+        // ストリーミング優先
+        if (USE_STREAM) {
+            sendMessageStreaming(messages)
+            .catch(err => {
+                console.warn("stream failed, fallback to non-stream:", err);
+                // フォールバック：従来エンドポイントで一括取得
+                return sendMessageNonStream(messages);
+               });
+            return;
+        }
+        // 非ストリームのまま
+        sendMessageNonStream(messages);
+    }
+
+    // --- 非ストリーム（従来） ---
+    function sendMessageNonStream(history) {
+        // Send request to server (non-stream)
+        return fetch('/api/chat/completion', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
+                'X-Session-Id': getSessionId(),
             },
             body: JSON.stringify({
-                messages: messages
+                messages: history
             })
         })
         .then(response => {
@@ -421,5 +607,83 @@ document.addEventListener('DOMContentLoaded', function() {
             showError(`Error: ${error.message}`);
             console.error('Error:', error);
         });
+    }
+
+    // --- ストリーミング ---
+    async function sendMessageStreaming(history) {
+        try {
+            const res = await fetch('/api/chat/stream', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Session-Id': getSessionId(),
+                },
+                body: JSON.stringify({ history })
+            });
+
+            if (!res.ok || !res.body) {
+                throw new Error(`stream http ${res.status}`);
+            }
+
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder('utf-8');
+            let buffer = '';
+
+            const state = startAssistantStreamBubble();
+            state.buffer = '';
+
+            let citations = [];
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+
+                let idx;
+                while ((idx = buffer.indexOf('\n\n')) >= 0) {
+                    const raw = buffer.slice(0, idx).trim();
+                    buffer = buffer.slice(idx + 2);
+                    if (!raw) continue;
+
+                    // SSE の event/data を読む
+                    const lines = raw.split('\n');
+                    let event = 'message';
+                    let data = null;
+                    for (const line of lines) {
+                        if (line.startsWith('event:')) event = line.slice(6).trim();
+                        if (line.startsWith('data:')) {
+                            try { data = JSON.parse(line.slice(5).trim()); } catch {}
+                        }
+                    }
+                    if (!data) continue;
+
+                    if (event === 'token') {
+                        appendStreamToken(state, data.delta || '');
+                    } else if (event === 'citations') {
+                        citations = data.items || [];
+                    } else if (event === 'done') {
+                        const isLow = !!data.is_low;
+                        if (isLow) {
+                            // 低信頼：これまでのRAGトークンをUIから消去して、以降のWeb検索トークンを同じバブルで受ける
+                            state.buffer = '';
+                            state.contentEl.textContent = '';
+                            // finalize も履歴追加も行わず、そのまま次の token（案内文→Web検索）を待つ
+                            continue;
+                        } else {
+                            finalizeStreamBubble(state, citations);
+                            hideLoading();
+                            // 会話履歴にも最終テキストを積む
+                            messages.push({ role: 'assistant', content: state.buffer });
+                        }
+                    } else if (event === 'error') {
+                        throw new Error(data.message || 'stream error');
+                    }
+                }
+            }
+        } catch (err) {
+            hideLoading();
+            showError(`Stream Error: ${err.message}`);
+            throw err;
+        }
     }
 });
