@@ -15,15 +15,18 @@ Key components:
 import os
 import logging
 import uvicorn
+import json
+from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
+import asyncio
 
-from app.models.chat_models import ChatRequest
+from app.models.chat_models import ChatRequest, ChatMessage
 
 # Configure logging
 logging.basicConfig(
@@ -51,7 +54,7 @@ ALLOWED_CONTAINERS = {"faq", "faq-outpput"}  # ここは実環境に合わせて
 
 ACCOUNT_URL = settings.blob_account_url
 
-def _is_allowed_host(path_or_url: str) -> bool:
+def is_allowed_host(path_or_url: str) -> bool:
     if not ACCOUNT_URL:
         return False
     try:
@@ -93,7 +96,11 @@ async def get_home(request: Request):
     """
     Serve the main chat interface
     """
-    return templates.TemplateResponse("index.html", {"request": request})
+    acc_host = urlparse(settings.blob_account_url).netloc if settings.blob_account_url else ""
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "blob_account_host": acc_host
+    })
 
 @app.get("/api/blob/sas", response_model=SasResult)
 async def get_blob_sas(
@@ -107,7 +114,7 @@ async def get_blob_sas(
     - ホワイトリストで意図しないコンテナをブロック
     """
     try:
-        if not _is_allowed_host(path):
+        if not is_allowed_host(path):
             raise HTTPException(status_code=403, detail="許可されていないストレージアカウントです。")
         if not is_allowed_container(path):
             raise HTTPException(status_code=403, detail="このコンテナは許可されていません。")
@@ -140,7 +147,7 @@ async def get_blob_sas(
 
 
 @app.post("/api/chat/completion")
-async def chat_completion(chat_request: ChatRequest):
+async def chat_completion(request: Request, chat_request: ChatRequest):
     """
     Process a chat completion request with RAG capabilities
     
@@ -174,15 +181,16 @@ async def chat_completion(chat_request: ChatRequest):
         
         # Get chat completion from RAG service
         response, is_low_confidence = await rag_chat_service.get_chat_completion(chat_request.messages)
-        print("application: ")
-        print(response)
         
         if is_low_confidence:
             logger.info("信頼度判定 → Bing Grounding Agent にフォールバック")
             
-            # 履歴全体を渡す
+            # セッションIDの決め方（例）: Cookie / Header / IP など
+            session_id = request.headers.get("x-session-id") or request.cookies.get("sid")
+            if not session_id:
+                session_id = str(uuid4())
             history_data = [{"role": m.role, "content": m.content} for m in chat_request.messages]
-            response = foundry_agent_service.search_with_bing(history_data)
+            response = foundry_agent_service.search_with_bing(session_id, history_data)
             
             # 案内文を付与(太字)
             notice_message = (
@@ -222,6 +230,145 @@ async def chat_completion(chat_request: ChatRequest):
                 }]
             }
 
+@app.post("/api/chat/stream")
+async def chat_stream(request: Request):
+    """
+    SSE ストリーミングで RAG 応答を逐次返す。
+    - event: token     { delta, cursor }
+    - event: citations { items }
+    - event: done      { content_len, is_low }
+    - event: error     { message }
+    """
+    try:
+        print("stream now")
+        payload = await request.json()
+        # フロントは {history:[...]} を送る想定。互換のため {messages:[...]} も受ける
+        raw_history = payload.get("history") or payload.get("messages") or []
+        history: list[ChatMessage] = []
+        for m in raw_history:
+            if isinstance(m, dict):
+                # role / content が欠けていても落ちないようにフォールバック
+                history.append(ChatMessage(role=m.get("role", "user"), content=str(m.get("content", ""))))
+            else:
+                # すでに ChatMessage の形ならそのまま
+                history.append(m)
+                
+
+        # NG質問フィルタ（最後の user 発話を対象）
+        latest_user = ""
+        for m in reversed(history):
+            if m.role == "user":
+                latest_user = (m.content or "")
+                break
+
+        is_blocked, reason = chat_filter.is_blocked_input(latest_user)
+
+        async def gen():
+            # ブロック時はSSEで即返して終了
+            if is_blocked:
+                denial = f"申し訳ありません。この質問は不適切または講義外のため回答できません。理由: {reason}"
+                yield rag_chat_service._sse_event("token", {"delta": denial, "cursor": len(denial)})
+                yield rag_chat_service._sse_event("citations", {"items": []})
+                yield rag_chat_service._sse_event("done", {"content_len": len(denial), "is_low": True})
+                return
+            
+            # セッションID（completion と同じ規約）
+            session_id = request.headers.get("x-session-id") or request.cookies.get("sid") or str(uuid4())
+            
+            # --- RAG ストリームを取り込みつつ判断 ---
+            rag_citations = []
+            rag_low = False
+            
+            # 通常：RAGストリームをそのまま中継
+            async for ev in rag_chat_service.stream_chat_completion(history):
+                if await request.is_disconnected():
+                    return
+                
+                # ここで SSE の 1 イベントを解析
+                try:
+                    text = ev.decode("utf-8")
+                    event = None
+                    data = None
+                    for line in text.splitlines():
+                        if line.startswith("event:"):
+                            event = line[6:].strip()
+                        elif line.startswith("data:"):
+                            data = json.loads(line[5:].strip())
+                except Exception:
+                    # パース失敗は素通し
+                    yield ev
+                    continue
+
+                if event == "token":
+                    # 本文はそのまま中継
+                    yield ev
+
+                elif event == "citations":
+                    # RAG の citations は保持のみ（送らない）
+                    rag_citations = data.get("items", [])
+
+                elif event == "done":
+                    rag_low = bool(data.get("is_low"))
+                    if not rag_low:
+                        # 通常完了：ここで RAG の citations を送り、RAG の done を中継
+                        yield rag_chat_service._sse_event("citations", {"items": rag_citations})
+                        yield ev
+                        return
+                    else:
+                        # フロントに「低信頼だったよ」を通知（確定せずにUIをクリアさせる）
+                        yield rag_chat_service._sse_event("done", {"content_len": data.get("content_len", 0), "is_low": True})
+                        # 低信頼 → Bing に切替（RAG の done は流さない）
+                        notice = "該当する資料が見当たらなかったので、Web検索による回答を生成しています。\n\n"
+                        yield rag_chat_service._sse_event("token", {"delta": notice, "cursor": 0})
+
+                        # フロント履歴形式に合わせて辞書化
+                        history_dicts = [{"role": m.role, "content": m.content} for m in history]
+                        async for w in foundry_agent_service.search_with_bing_stream(session_id, history_dicts):
+                            if await request.is_disconnected():
+                                return
+                            t = w.get("type")
+                            if t == "token":
+                                yield rag_chat_service._sse_event("token", {"delta": w.get("delta", ""), "cursor": 0})
+                            elif t == "citations":
+                                yield rag_chat_service._sse_event("citations", {"items": w.get("items", [])})
+                            elif t == "done":
+                                # ここで初めて done を１回だけ返す
+                                yield rag_chat_service._sse_event("done", {"content_len": 0, "is_low": False})
+                                return
+                            elif t == "error":
+                                # 失敗時も会話を閉じてバブルを確定させる
+                                yield rag_chat_service._sse_event("token", {"delta": "\n\n(検索でエラーが発生しました)", "cursor": 0})
+                                yield rag_chat_service._sse_event("done", {"content_len": 0, "is_low": False})
+                                return
+                        # 念のため
+                        yield rag_chat_service._sse_event("done", {"content_len": 0, "is_low": False})
+                        return
+
+                else:
+                    # 未知イベントは中継
+                    yield ev
+
+                # 小刻みにflush（環境によってはなくてもOK）
+                await asyncio.sleep(0)
+            
+            # RAG 側が自然終了した場合のフォールバック（通常ここには来ない）
+            yield rag_chat_service._sse_event("done", {"content_len": 0, "is_low": False})
+        
+        headers = {
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Nginx系のバッファ抑止
+        }
+        return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)
+
+    except asyncio.CancelledError:
+        # クライアント側で中断された
+        return
+    except Exception as e:
+        # SSEではHTTPエラーよりも error イベントで返した方がフロント処理が楽
+        async def gen_err():
+            yield rag_chat_service._sse_event("error", {"message": str(e)})
+        return StreamingResponse(gen_err(), media_type="text/event-stream")
 
 @app.get("/api/health")
 async def health_check():
